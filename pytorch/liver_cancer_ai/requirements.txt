@@ -1,0 +1,6 @@
+flask
+nibabel
+pillow
+torch
+numpy
+matplotlib

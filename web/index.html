@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>智能肝癌影像辅助诊断系统</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#home" aria-label="智能肝癌影像辅助诊断系统">
+      <span class="brand-mark">H</span>
+      <span>智能肝癌影像辅助诊断</span>
+    </a>
+    <nav class="nav" aria-label="主导航">
+      <a href="#home">首页</a>
+      <a href="#diagnosis">影像诊断</a>
+      <a href="#model">模型技术</a>
+    </nav>
+    <button class="ghost-button" id="logoutButton" type="button">退出</button>
+  </header>
+
+  <main>
+    <section class="hero" id="home">
+      <div class="hero-media" aria-hidden="true">
+        <img src="../Figures/social_preview.jpg" alt="">
+      </div>
+      <div class="hero-content">
+        <p class="eyebrow">UNet++ · ECA通道注意力 · 空洞卷积</p>
+        <h1>智能肝癌影像辅助诊断系统</h1>
+        <p class="hero-copy">面向肝脏 CT 影像分析，辅助医生快速判断疑似肝癌风险，并同步展示预测结果、用时和模型精度。</p>
+        <div class="hero-actions">
+          <a class="primary-button" href="#diagnosis">开始诊断</a>
+          <a class="secondary-button" href="#model">查看技术</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="feature-band" aria-label="产品能力">
+      <div class="metric">
+        <strong>UNet++</strong>
+        <span>嵌套跳跃连接</span>
+      </div>
+      <div class="metric">
+        <strong>ECA</strong>
+        <span>高效通道注意力</span>
+      </div>
+      <div class="metric">
+        <strong>Dilation</strong>
+        <span>扩大病灶感受野</span>
+      </div>
+      <div class="metric">
+        <strong>CT</strong>
+        <span>肝脏影像筛查</span>
+      </div>
+    </section>
+
+    <section class="diagnosis" id="diagnosis">
+      <div class="section-heading">
+        <p class="eyebrow">功能展示界面</p>
+        <h2>CT 片上传与预测诊断</h2>
+      </div>
+
+      <div class="workspace">
+        <div class="panel upload-panel">
+          <div class="panel-title">
+            <h3>上传 CT 影像</h3>
+            <span id="fileState">待上传</span>
+          </div>
+          <label class="dropzone" for="ctFile">
+            <input id="ctFile" type="file" accept="image/*,.dcm,.nii,.nii.gz">
+            <span class="upload-icon">+</span>
+            <strong>选择或拖入 CT 片</strong>
+            <small>支持 PNG、JPG、DICOM、NIfTI 演示文件</small>
+          </label>
+          <div class="preview-frame">
+            <img id="previewImage" src="../Figures/fig_prediction_comparison.png" alt="CT影像预览">
+          </div>
+          <button class="primary-button full" id="predictButton" type="button">Upload</button>
+        </div>
+
+        <div class="panel result-panel">
+          <div class="panel-title">
+            <h3>预测结果</h3>
+            <span id="resultState">未诊断</span>
+          </div>
+          <div class="result-main" id="resultMain">
+            <span class="risk-label">等待影像</span>
+            <strong>--</strong>
+            <p>上传 CT 片后生成诊断预测。</p>
+          </div>
+          <div class="result-grid">
+            <div>
+              <span>预测时间</span>
+              <strong id="timeValue">-- s</strong>
+            </div>
+            <div>
+              <span>预测精度</span>
+              <strong id="accuracyValue">--%</strong>
+            </div>
+            <div>
+              <span>置信度</span>
+              <strong id="confidenceValue">--%</strong>
+            </div>
+            <div>
+              <span>分割 Dice</span>
+              <strong id="diceValue">--</strong>
+            </div>
+          </div>
+          <div class="mask-view" aria-label="病灶分割示意">
+            <div class="scan"></div>
+            <div class="lesion"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="model" id="model">
+      <div class="section-heading">
+        <p class="eyebrow">模型技术路线</p>
+        <h2>UNet++ 融合 ECA 与空洞卷积</h2>
+      </div>
+      <div class="model-layout">
+        <img src="../Figures/fig_unet++.png" alt="UNet++网络结构图">
+        <div class="model-copy">
+          <h3>多尺度病灶特征提取</h3>
+          <p>通过嵌套式跳跃连接保留浅层纹理与深层语义，ECA 模块增强关键通道响应，空洞卷积扩大上下文感受野，提高肝脏 CT 中小病灶区域的识别能力。</p>
+          <ul>
+            <li>登录后进入诊断页面，减少无关操作干扰。</li>
+            <li>上传 CT 片后自动生成预测结果、精度和耗时。</li>
+            <li>结果区同步展示疑似病灶分割提示，便于医生复核。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="login-screen" id="loginScreen">
+    <form class="login-card" id="loginForm">
+      <span class="brand-mark large">H</span>
+      <h2>医生登录</h2>
+      <label>
+        账号
+        <input type="text" value="doctor" autocomplete="username">
+      </label>
+      <label>
+        密码
+        <input type="password" value="123456" autocomplete="current-password">
+      </label>
+      <button class="primary-button full" type="submit">登录</button>
+    </form>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

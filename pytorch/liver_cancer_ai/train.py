@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 import torch.nn.functional as F
 
 from .inference import _load_image_as_array
@@ -37,6 +37,7 @@ class LiverSliceDataset(Dataset):
         self.images = sorted([path for path in self.image_dir.iterdir() if path.is_file()])
         if not self.images:
             raise ValueError(f"No training images found in {self.image_dir}")
+        self._positive_cache = None
 
     def __len__(self):
         return len(self.images)
@@ -54,6 +55,21 @@ class LiverSliceDataset(Dataset):
         if self.augment:
             image, mask = self._augment_pair(image, mask)
         return image, mask.long()
+
+    def positive_flags(self):
+        if self._positive_cache is not None:
+            return self._positive_cache
+        flags = []
+        for image_path in self.images:
+            mask_path = self.mask_dir / image_path.name
+            if not mask_path.exists() and image_path.suffix.lower() != ".png":
+                mask_path = self.mask_dir / f"{image_path.stem}.png"
+            if not mask_path.exists():
+                raise FileNotFoundError(f"Mask not found for {image_path.name}")
+            mask = np.squeeze(_load_image_as_array(mask_path)).astype(np.float32)
+            flags.append(bool((mask > 0).any()))
+        self._positive_cache = flags
+        return flags
 
     def _prepare_image(self, image):
         image = np.squeeze(image).astype(np.float32)
@@ -112,6 +128,45 @@ class DiceCrossEntropyLoss(nn.Module):
         union = prob.sum(dim=(1, 2)) + target_float.sum(dim=(1, 2))
         dice_loss = 1.0 - ((2.0 * intersection + eps) / (union + eps)).mean()
         return self.ce_weight * ce + self.dice_weight * dice_loss
+
+
+class FocalTverskyCrossEntropyLoss(nn.Module):
+    def __init__(
+        self,
+        tumor_weight=5.0,
+        alpha=0.3,
+        beta=0.7,
+        gamma=0.75,
+        tversky_weight=1.0,
+        ce_weight=0.5,
+    ):
+        super().__init__()
+        self.register_buffer("class_weights", torch.tensor([1.0, float(tumor_weight)], dtype=torch.float32))
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.tversky_weight = tversky_weight
+        self.ce_weight = ce_weight
+
+    def forward(self, logits, target):
+        if isinstance(logits, (list, tuple)):
+            weights = [0.1, 0.2, 0.3, 0.4][-len(logits):]
+            weights = [weight / sum(weights) for weight in weights]
+            return sum(weight * self._single(output, target) for weight, output in zip(weights, logits))
+        return self._single(logits, target)
+
+    def _single(self, logits, target, eps=1e-6):
+        class_weights = self.class_weights.to(logits.device)
+        ce = F.cross_entropy(logits, target, weight=class_weights)
+        prob = torch.softmax(logits, dim=1)[:, 1]
+        target_float = (target == 1).float()
+
+        true_pos = (prob * target_float).sum(dim=(1, 2))
+        false_pos = (prob * (1.0 - target_float)).sum(dim=(1, 2))
+        false_neg = ((1.0 - prob) * target_float).sum(dim=(1, 2))
+        tversky = (true_pos + eps) / (true_pos + self.alpha * false_pos + self.beta * false_neg + eps)
+        focal_tversky = torch.pow(1.0 - tversky, self.gamma).mean()
+        return self.ce_weight * ce + self.tversky_weight * focal_tversky
 
 
 def dice_score(logits, target, eps=1e-6):
@@ -275,6 +330,21 @@ def main():
     parser.add_argument("--base-channels", type=int, default=32)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--tumor-weight", type=float, default=5.0)
+    parser.add_argument(
+        "--loss",
+        choices=["dice-ce", "focal-tversky-ce"],
+        default="dice-ce",
+        help="Training loss. focal-tversky-ce is usually better for small lesion segmentation.",
+    )
+    parser.add_argument("--tversky-alpha", type=float, default=0.3)
+    parser.add_argument("--tversky-beta", type=float, default=0.7)
+    parser.add_argument("--tversky-gamma", type=float, default=0.75)
+    parser.add_argument(
+        "--positive-sample-weight",
+        type=float,
+        default=1.0,
+        help="Oversample slices containing tumor pixels. Use 1.0 to disable, try 4.0 for imbalanced data.",
+    )
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--deep-supervision", action="store_true")
     parser.add_argument("--no-augment", action="store_true")
@@ -296,10 +366,26 @@ def main():
     )
     val_set = LiverSliceDataset(args.val_images, args.val_masks, image_size=args.image_size, augment=False)
     pin_memory = device.type == "cuda"
+    sampler = None
+    shuffle = True
+    positive_count = 0
+    if args.positive_sample_weight > 1.0:
+        positive_flags = train_set.positive_flags()
+        positive_count = sum(positive_flags)
+        if positive_count == 0:
+            raise ValueError("positive_sample_weight was enabled, but no positive masks were found in the training set.")
+        sample_weights = [args.positive_sample_weight if is_positive else 1.0 for is_positive in positive_flags]
+        sampler = WeightedRandomSampler(
+            weights=torch.as_tensor(sample_weights, dtype=torch.double),
+            num_samples=len(sample_weights),
+            replacement=True,
+        )
+        shuffle = False
     train_loader = DataLoader(
         train_set,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=shuffle,
+        sampler=sampler,
         num_workers=args.num_workers,
         pin_memory=pin_memory,
     )
@@ -312,7 +398,15 @@ def main():
     )
 
     model = build_liver_eca_unetpp(base_channels=args.base_channels, deep_supervision=args.deep_supervision).to(device)
-    criterion = DiceCrossEntropyLoss(tumor_weight=args.tumor_weight)
+    if args.loss == "focal-tversky-ce":
+        criterion = FocalTverskyCrossEntropyLoss(
+            tumor_weight=args.tumor_weight,
+            alpha=args.tversky_alpha,
+            beta=args.tversky_beta,
+            gamma=args.tversky_gamma,
+        )
+    else:
+        criterion = DiceCrossEntropyLoss(tumor_weight=args.tumor_weight)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(args.epochs, 1), eta_min=args.lr * 0.05)
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
@@ -320,7 +414,9 @@ def main():
     print(
         f"device={device} train_samples={len(train_set)} val_samples={len(val_set)} "
         f"epochs={args.epochs} batch_size={args.batch_size} image_size={args.image_size} "
-        f"base_channels={args.base_channels} lr={args.lr} tumor_weight={args.tumor_weight} "
+        f"base_channels={args.base_channels} lr={args.lr} tumor_weight={args.tumor_weight} loss={args.loss} "
+        f"tversky_alpha={args.tversky_alpha} tversky_beta={args.tversky_beta} tversky_gamma={args.tversky_gamma} "
+        f"positive_sample_weight={args.positive_sample_weight} positive_slices={positive_count or 'not_counted'} "
         f"deep_supervision={args.deep_supervision} amp={scaler.is_enabled()} augment={not args.no_augment}",
         flush=True,
     )
@@ -369,6 +465,7 @@ def main():
                     "image_size": args.image_size,
                     "base_channels": args.base_channels,
                     "deep_supervision": args.deep_supervision,
+                    "loss": args.loss,
                 },
                 args.output,
             )

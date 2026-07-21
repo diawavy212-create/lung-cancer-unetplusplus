@@ -1,5 +1,5 @@
-"""Liver cancer CT diagnosis helpers built on UNet++ with ECA attention."""
+"""Liver tumor CT segmentation helpers built on U-Net and UNet++ variants."""
 
-from .model import LiverECAUNetPlusPlus, build_liver_eca_unetpp
+from .model import LiverECAUNetPlusPlus, UNet, build_liver_eca_unetpp, build_segmentation_model
 
-__all__ = ["LiverECAUNetPlusPlus", "build_liver_eca_unetpp"]
+__all__ = ["LiverECAUNetPlusPlus", "UNet", "build_liver_eca_unetpp", "build_segmentation_model"]

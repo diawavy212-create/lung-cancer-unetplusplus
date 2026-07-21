@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .model import build_liver_eca_unetpp
+from .model import build_segmentation_model
 
 
 def _load_image_as_array(path):
@@ -52,12 +52,14 @@ def _load_checkpoint_metadata(weights_path, device):
     return state_dict, metadata
 
 
-def load_model(weights_path=None, device=None, base_channels=32, deep_supervision=False):
+def load_model(weights_path=None, device=None, base_channels=32, deep_supervision=False, model_name="eca-dilated-unetpp"):
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     state_dict, metadata = _load_checkpoint_metadata(weights_path, device)
     base_channels = int(metadata.get("base_channels", base_channels))
     deep_supervision = bool(metadata.get("deep_supervision", deep_supervision))
-    model = build_liver_eca_unetpp(
+    model_name = metadata.get("model", metadata.get("model_name", model_name))
+    model = build_segmentation_model(
+        model_name=model_name,
         in_channels=1,
         num_classes=2,
         base_channels=base_channels,
@@ -74,17 +76,20 @@ def load_model(weights_path=None, device=None, base_channels=32, deep_supervisio
 @torch.no_grad()
 def predict_ct(path, weights_path=None, device=None, threshold=0.5, image_size=256, base_channels=32):
     deep_supervision = False
+    model_name = "eca-dilated-unetpp"
     if weights_path:
         checkpoint = torch.load(weights_path, map_location="cpu")
         if isinstance(checkpoint, dict):
             image_size = int(checkpoint.get("image_size", image_size))
             base_channels = int(checkpoint.get("base_channels", base_channels))
             deep_supervision = bool(checkpoint.get("deep_supervision", deep_supervision))
+            model_name = checkpoint.get("model", checkpoint.get("model_name", "eca-dilated-unetpp"))
     model, device = load_model(
         weights_path=weights_path,
         device=device,
         base_channels=base_channels,
         deep_supervision=deep_supervision,
+        model_name=model_name,
     )
     tensor = preprocess_ct(path, image_size=image_size).to(device)
 

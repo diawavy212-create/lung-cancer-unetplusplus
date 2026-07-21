@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 import torch.nn.functional as F
 
 from .inference import _load_image_as_array
-from .model import build_liver_eca_unetpp
+from .model import build_segmentation_model
 
 
 class ProgressBar:
@@ -29,11 +29,12 @@ class ProgressBar:
 
 
 class LiverSliceDataset(Dataset):
-    def __init__(self, image_dir, mask_dir, image_size=256, augment=False):
+    def __init__(self, image_dir, mask_dir, image_size=256, augment=False, strong_augment=False):
         self.image_dir = Path(image_dir)
         self.mask_dir = Path(mask_dir)
         self.image_size = image_size
         self.augment = augment
+        self.strong_augment = strong_augment
         self.images = sorted([path for path in self.image_dir.iterdir() if path.is_file()])
         if not self.images:
             raise ValueError(f"No training images found in {self.image_dir}")
@@ -102,7 +103,42 @@ class LiverSliceDataset(Dataset):
         if rotations:
             image = torch.rot90(image, rotations, dims=[1, 2])
             mask = torch.rot90(mask, rotations, dims=[0, 1])
+        if self.strong_augment:
+            image, mask = self._random_affine_pair(image, mask)
+            image = self._augment_intensity(image)
         return image.contiguous(), mask.contiguous()
+
+    def _random_affine_pair(self, image, mask):
+        if torch.rand(()) >= 0.6:
+            return image, mask
+
+        scale = float(torch.empty(1).uniform_(0.90, 1.10).item())
+        translate_x = float(torch.empty(1).uniform_(-0.08, 0.08).item())
+        translate_y = float(torch.empty(1).uniform_(-0.08, 0.08).item())
+        theta = torch.tensor(
+            [[[scale, 0.0, translate_x], [0.0, scale, translate_y]]],
+            dtype=image.dtype,
+            device=image.device,
+        )
+        image_batch = image.unsqueeze(0)
+        mask_batch = mask.unsqueeze(0).unsqueeze(0).float()
+        grid = F.affine_grid(theta, image_batch.size(), align_corners=False)
+        image = F.grid_sample(image_batch, grid, mode="bilinear", padding_mode="border", align_corners=False).squeeze(0)
+        mask = F.grid_sample(mask_batch, grid, mode="nearest", padding_mode="zeros", align_corners=False).squeeze(0).squeeze(0)
+        return image, mask
+
+    def _augment_intensity(self, image):
+        if torch.rand(()) < 0.7:
+            contrast = torch.empty(1, dtype=image.dtype, device=image.device).uniform_(0.80, 1.20)
+            brightness = torch.empty(1, dtype=image.dtype, device=image.device).uniform_(-0.10, 0.10)
+            image = image * contrast + brightness
+        if torch.rand(()) < 0.5:
+            gamma = torch.empty(1, dtype=image.dtype, device=image.device).uniform_(0.80, 1.30)
+            image = torch.clamp(image, 0.0, 1.0).pow(gamma)
+        if torch.rand(()) < 0.4:
+            noise_std = torch.empty(1, dtype=image.dtype, device=image.device).uniform_(0.00, 0.03)
+            image = image + torch.randn_like(image) * noise_std
+        return torch.clamp(image, 0.0, 1.0)
 
 
 class DiceCrossEntropyLoss(nn.Module):
@@ -327,6 +363,12 @@ def main():
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--image-size", type=int, default=256)
+    parser.add_argument(
+        "--model",
+        choices=["unet", "unetpp", "eca-unetpp", "eca-dilated-unetpp"],
+        default="eca-dilated-unetpp",
+        help="Model variant for comparison and ablation experiments.",
+    )
     parser.add_argument("--base-channels", type=int, default=32)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--tumor-weight", type=float, default=5.0)
@@ -348,6 +390,11 @@ def main():
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--deep-supervision", action="store_true")
     parser.add_argument("--no-augment", action="store_true")
+    parser.add_argument(
+        "--strong-augment",
+        action="store_true",
+        help="Use stronger CT-safe augmentation: mild affine transform, intensity jitter, gamma, and noise.",
+    )
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", default="liver_eca_unetpp_best.pth")
@@ -362,7 +409,11 @@ def main():
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested, but this Python environment has a CPU-only PyTorch build.")
     train_set = LiverSliceDataset(
-        args.train_images, args.train_masks, image_size=args.image_size, augment=not args.no_augment
+        args.train_images,
+        args.train_masks,
+        image_size=args.image_size,
+        augment=not args.no_augment,
+        strong_augment=args.strong_augment,
     )
     val_set = LiverSliceDataset(args.val_images, args.val_masks, image_size=args.image_size, augment=False)
     pin_memory = device.type == "cuda"
@@ -397,7 +448,11 @@ def main():
         pin_memory=pin_memory,
     )
 
-    model = build_liver_eca_unetpp(base_channels=args.base_channels, deep_supervision=args.deep_supervision).to(device)
+    model = build_segmentation_model(
+        model_name=args.model,
+        base_channels=args.base_channels,
+        deep_supervision=args.deep_supervision,
+    ).to(device)
     if args.loss == "focal-tversky-ce":
         criterion = FocalTverskyCrossEntropyLoss(
             tumor_weight=args.tumor_weight,
@@ -414,10 +469,12 @@ def main():
     print(
         f"device={device} train_samples={len(train_set)} val_samples={len(val_set)} "
         f"epochs={args.epochs} batch_size={args.batch_size} image_size={args.image_size} "
-        f"base_channels={args.base_channels} lr={args.lr} tumor_weight={args.tumor_weight} loss={args.loss} "
+        f"model={args.model} base_channels={args.base_channels} lr={args.lr} tumor_weight={args.tumor_weight} "
+        f"loss={args.loss} "
         f"tversky_alpha={args.tversky_alpha} tversky_beta={args.tversky_beta} tversky_gamma={args.tversky_gamma} "
         f"positive_sample_weight={args.positive_sample_weight} positive_slices={positive_count or 'not_counted'} "
-        f"deep_supervision={args.deep_supervision} amp={scaler.is_enabled()} augment={not args.no_augment}",
+        f"deep_supervision={args.deep_supervision} amp={scaler.is_enabled()} augment={not args.no_augment} "
+        f"strong_augment={args.strong_augment}",
         flush=True,
     )
 
@@ -463,9 +520,11 @@ def main():
                     "state_dict": model.state_dict(),
                     "best_dice": best_dice,
                     "image_size": args.image_size,
+                    "model": args.model,
                     "base_channels": args.base_channels,
                     "deep_supervision": args.deep_supervision,
                     "loss": args.loss,
+                    "strong_augment": args.strong_augment,
                 },
                 args.output,
             )
